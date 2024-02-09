@@ -101,7 +101,7 @@ pub const LC3 = struct {
         }
     }
 
-    pub fn start(self: *LC3) void {
+    pub fn start(self: *LC3) !void {
         self.running = true;
 
         while (self.running) {
@@ -110,6 +110,7 @@ pub const LC3 = struct {
 
             const opcode: OP = @enumFromInt(instr >> 12); // only the 4 leftmost bits are the opcode
 
+            std.debug.print("opcode: {}\n", .{opcode});
             try switch (opcode) {
                 .ADD => self.op_add(instr),
                 .AND => self.op_and(instr),
@@ -143,11 +144,13 @@ pub const LC3 = struct {
         self.memory[addr] = val;
     }
 
-    fn mem_read(self: *LC3, addr: u16) u16 {
+    fn mem_read(self: *LC3, addr: u16) !u16 {
         if (addr == @intFromEnum(MR.KBSR)) {
             if (self.term.check_key()) {
                 self.memory[@intFromEnum(MR.KBSR)] = (1 << 15);
-                self.memory[@intFromEnum(MR.KBDR)] = self.term.get_char();
+                self.memory[@intFromEnum(MR.KBDR)] = try self.term.get_char();
+            } else {
+                self.memory[@intFromEnum(MR.KBSR)] = 0;
             }
         }
         return self.memory[addr];
@@ -203,9 +206,9 @@ pub const LC3 = struct {
 
     fn op_br(self: *LC3, instr: u16) void {
         // we will only brnach if the nzp condition flag matches the condition flag in the register
+        const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         const cond_code = (instr >> 9) & 0x7;
         if ((cond_code & self.reg[@intFromEnum(R.COND)]) != 0) {
-            const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
             self.reg[@intFromEnum(R.PC)] += pc_offset;
         }
     }
@@ -229,30 +232,30 @@ pub const LC3 = struct {
         }
     }
 
-    fn op_ld(self: *LC3, instr: u16) void {
+    fn op_ld(self: *LC3, instr: u16) !void {
         const dr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         // use the offset address, to move data from memory to DR
-        self.reg[dr] = self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
+        self.reg[dr] = try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
 
         self.update_flag(dr);
     }
 
-    fn op_ldi(self: *LC3, instr: u16) void {
+    fn op_ldi(self: *LC3, instr: u16) !void {
         const dr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         // take the address at one location in memory, to access another location, and store data in DR
-        self.reg[dr] = self.mem_read(self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset));
+        self.reg[dr] = try self.mem_read(try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset));
 
         self.update_flag(dr);
     }
 
-    fn op_ldr(self: *LC3, instr: u16) void {
+    fn op_ldr(self: *LC3, instr: u16) !void {
         const dr = (instr >> 9) & 0x7;
         const br = (instr >> 6) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x3F, 6);
 
-        self.reg[dr] = self.mem_read(self.reg[br] + pc_offset);
+        self.reg[dr] = try self.mem_read(self.reg[br] + pc_offset);
 
         self.update_flag(dr);
     }
@@ -289,11 +292,11 @@ pub const LC3 = struct {
         self.mem_write(addr, val);
     }
 
-    fn op_sti(self: *LC3, instr: u16) void {
+    fn op_sti(self: *LC3, instr: u16) !void {
         const sr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
 
-        const addr = self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
+        const addr = try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
         const val = self.reg[sr];
 
         self.mem_write(addr, val);
@@ -317,6 +320,7 @@ pub const LC3 = struct {
     fn op_trap(self: *LC3, instr: u16) !void {
         self.reg[@intFromEnum(R.R7)] = self.reg[@intFromEnum(R.PC)];
         const trap_code: TRAP = @enumFromInt(instr & 0xFF);
+        std.debug.print("trap: {}\n", .{trap_code});
         switch (trap_code) {
             .GETC => try self.trap_getc(),
             .OUT => try self.trap_out(),
@@ -338,57 +342,57 @@ pub const LC3 = struct {
     fn trap_out(self: *LC3) !void {
         const char = self.reg[@intFromEnum(R.R0)];
         try self.term.put_char(@intCast(char));
-        try self.term.flush();
+        // try self.term.flush();
     }
 
     fn trap_puts(self: *LC3) !void {
-        const index = self.reg[@intFromEnum(R.R0)];
-        const char = self.mem_read(index);
+        var index = self.reg[@intFromEnum(R.R0)];
+        var char = try self.mem_read(index);
 
-        while (char != 0xFFFF) : ({
+        while (char != 0x0000) : ({
             index += 1;
-            char = self.mem_read(index);
+            char = try self.mem_read(index);
         }) {
-            try self.term.put_char(@as(u8, char));
+            try self.term.put_char(@intCast(char));
         }
 
-        try self.term.flush();
+        // try self.term.flush();
     }
 
     fn trap_in(self: *LC3) !void {
         try self.term.put_string("Enter a character: ");
 
-        const char = self.term.get_char();
+        const char = try self.term.get_char();
 
-        try self.term.flush();
+        // try self.term.flush();
 
         self.reg[@intFromEnum(R.R0)] = @as(u16, char);
         self.update_flag(@intFromEnum(R.R0));
     }
 
     fn trap_putsp(self: *LC3) !void {
-        const index = self.reg[@intFromEnum(R.R0)];
-        const char = self.mem_read(index);
+        var index = self.reg[@intFromEnum(R.R0)];
+        var char = try self.mem_read(index);
 
-        while (char != 0xFFFF) : ({
+        while (char != 0x0000) : ({
             index += 1;
-            char = self.mem_read(index);
+            char = try self.mem_read(index);
         }) {
-            const char1 = @as(u8, (char & 0xFF));
+            const char1: u8 = @intCast(char & 0xFF);
             try self.term.put_char(char1);
 
-            const char2 = @as(u8, (char >> 8));
-            if (char2) {
+            const char2: u8 = @intCast(char >> 8);
+            if (char2 != 0) {
                 try self.term.put_char(char2);
             }
         }
 
-        try self.term.flush();
+        // try self.term.flush();
     }
 
     fn trap_halt(self: *LC3) !void {
-        try self.term.put_char("HALT");
-        try self.term.flush();
+        try self.term.put_string("HALT");
+        // try self.term.flush();
 
         self.running = false;
     }
