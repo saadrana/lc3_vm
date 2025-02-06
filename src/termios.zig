@@ -1,15 +1,16 @@
 const std = @import("std");
 const os = std.os;
+const posix = std.posix;
 
 pub const Term = struct {
     buffer: [1]u8,
     ttyfile: std.fs.File,
-    termios: os.termios,
+    termios: posix.termios,
 
     pub fn init() !Term {
         var ttyfile = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
         errdefer ttyfile.close();
-        const termios = try os.tcgetattr(ttyfile.handle);
+        const termios = try posix.tcgetattr(ttyfile.handle);
 
         return .{ .buffer = undefined, .ttyfile = ttyfile, .termios = termios };
     }
@@ -29,13 +30,13 @@ pub const Term = struct {
     }
 
     pub fn check_key(self: *Term) bool {
-        var pollfds = [_]std.os.pollfd{
-            .{ .fd = self.ttyfile.handle, .events = std.os.POLL.IN, .revents = 0 },
+        var pollfds = [_]posix.pollfd{
+            .{ .fd = self.ttyfile.handle, .events = posix.POLL.IN, .revents = 0 },
         };
 
         const timeout = -1;
 
-        const poll = std.os.poll(&pollfds, timeout) catch {
+        const poll = posix.poll(&pollfds, timeout) catch {
             return false;
         };
 
@@ -43,13 +44,13 @@ pub const Term = struct {
     }
 
     pub fn restore_input_buffering(self: *Term) !void {
-        try os.tcsetattr(self.ttyfile.handle, os.TCSA.NOW, self.termios);
+        try posix.tcsetattr(self.ttyfile.handle, os.TCSA.NOW, self.termios);
     }
 
     pub fn disable_input_buffering(self: *Term) !void {
-        self.termios = try os.tcgetattr(self.ttyfile.handle);
+        self.termios = try posix.tcgetattr(self.ttyfile.handle);
         var new_termios = self.termios;
         new_termios.lflag &= ~(os.linux.ECHO | os.linux.ICANON);
-        try os.tcsetattr(self.ttyfile.handle, os.TCSA.NOW, new_termios);
+        try posix.tcsetattr(self.ttyfile.handle, os.TCSA.NOW, new_termios);
     }
 };
