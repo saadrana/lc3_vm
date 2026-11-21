@@ -1,8 +1,5 @@
 const std = @import("std");
-const fs = std.fs;
-const mem = std.mem;
-const assert = std.debug.assert;
-const expect = std.testing.expect;
+const Io = std.Io;
 
 const bit_ops = @import("bit_ops.zig");
 const termios = @import("termios.zig");
@@ -66,7 +63,7 @@ const MR = enum(u16) {
 pub const LC3 = struct {
     const Self = @This();
     memory: [MAX_MEMORY]u16 = undefined,
-    reg: [@intFromEnum(R.COUNT)]u16 = undefined,
+    reg: [@backingInt(R.COUNT)]u16 = undefined,
     running: bool = false,
     term: *termios.Term,
 
@@ -79,39 +76,51 @@ pub const LC3 = struct {
     pub fn reset(self: *Self) void {
         self.running = false;
 
-        self.memory = [_]u16{0} ** MAX_MEMORY;
-        self.reg = [_]u16{0} ** @intFromEnum(R.COUNT);
+        self.memory = @splat(0);
+        self.reg = @splat(0);
 
-        self.reg[@intFromEnum(R.PC)] = PC_START;
-        self.reg[@intFromEnum(R.COND)] = @intFromEnum(FL.ZRO);
+        self.reg[@backingInt(R.PC)] = PC_START;
+        self.reg[@backingInt(R.COND)] = @backingInt(FL.ZRO);
     }
 
-    pub fn load_rom(self: *Self, rom_path: []const u8) !void {
+    pub fn load_rom(self: *Self, io: Io, rom_path: []const u8) !void {
+        const file = try Io.Dir.cwd().openFile(io, rom_path, .{});
+        defer file.close(io);
+
+        var buffer: [4096]u8 = undefined;
+        var reader = file.reader(io, &buffer);
+        try self.load_image(&reader.interface);
+    }
+
+    fn load_image(self: *Self, reader: *Io.Reader) !void {
         self.reset();
 
-        const file = try std.fs.cwd().openFile(rom_path, .{});
-        defer file.close();
+        const origin = try reader.takeInt(u16, .big);
+        self.reg[@backingInt(R.PC)] = origin;
+        var offset: usize = origin;
+        var word: [2]u8 = undefined;
 
-        var reader = file.reader();
-
-        var buffer: [2]u8 = undefined;
-        var offset: usize = PC_START;
-
-        while (try reader.read(&buffer) != 0) : (offset += 1) {
-            self.memory[offset] = std.mem.readVarInt(u16, buffer[0..], std.builtin.Endian.big);
+        while (true) : (offset += 1) {
+            switch (try reader.readSliceShort(&word)) {
+                0 => return,
+                1 => return error.TruncatedRom,
+                else => {},
+            }
+            if (offset >= self.memory.len) return error.RomTooLarge;
+            self.memory[offset] = std.mem.readInt(u16, &word, .big);
         }
     }
 
     pub fn start(self: *Self) !void {
         self.running = true;
+        defer self.running = false;
 
         while (self.running) {
-            const instr = self.memory[self.reg[@intFromEnum(R.PC)]];
-            self.reg[@intFromEnum(R.PC)] += 1;
+            const instr = self.memory[self.reg[@backingInt(R.PC)]];
+            self.reg[@backingInt(R.PC)] +%= 1;
 
-            const opcode: OP = @enumFromInt(instr >> 12); // only the 4 leftmost bits are the opcode
+            const opcode: OP = @fromBackingInt(@intCast(instr >> 12)); // only the 4 leftmost bits are the opcode
 
-            std.debug.print("opcode: {}\n", .{opcode});
             try switch (opcode) {
                 .ADD => self.op_add(instr),
                 .AND => self.op_and(instr),
@@ -123,11 +132,11 @@ pub const LC3 = struct {
                 .LDR => self.op_ldr(instr),
                 .LEA => self.op_lea(instr),
                 .NOT => self.op_not(instr),
-                .RTI => op_rti(),
+                .RTI => error.UnsupportedRTI,
                 .ST => self.op_st(instr),
                 .STI => self.op_sti(instr),
                 .STR => self.op_str(instr),
-                .RES => op_res(),
+                .RES => error.IllegalOpcode,
                 .TRAP => self.op_trap(instr),
             };
         }
@@ -146,12 +155,12 @@ pub const LC3 = struct {
     }
 
     fn mem_read(self: *Self, addr: u16) !u16 {
-        if (addr == @intFromEnum(MR.KBSR)) {
+        if (addr == @backingInt(MR.KBSR)) {
             if (self.term.check_key()) {
-                self.memory[@intFromEnum(MR.KBSR)] = (1 << 15);
-                self.memory[@intFromEnum(MR.KBDR)] = try self.term.get_char();
+                self.memory[@backingInt(MR.KBSR)] = (1 << 15);
+                self.memory[@backingInt(MR.KBDR)] = try self.term.get_char();
             } else {
-                self.memory[@intFromEnum(MR.KBSR)] = 0;
+                self.memory[@backingInt(MR.KBSR)] = 0;
             }
         }
         return self.memory[addr];
@@ -159,11 +168,11 @@ pub const LC3 = struct {
 
     fn update_flag(self: *Self, r: u16) void {
         if (self.reg[r] == 0) {
-            self.reg[@intFromEnum(R.COND)] = @intFromEnum(FL.ZRO);
+            self.reg[@backingInt(R.COND)] = @backingInt(FL.ZRO);
         } else if (self.reg[r] >> 15 == 1) {
-            self.reg[@intFromEnum(R.COND)] = @intFromEnum(FL.NEG);
+            self.reg[@backingInt(R.COND)] = @backingInt(FL.NEG);
         } else {
-            self.reg[@intFromEnum(R.COND)] = @intFromEnum(FL.POS);
+            self.reg[@backingInt(R.COND)] = @backingInt(FL.POS);
         }
     }
 
@@ -177,10 +186,10 @@ pub const LC3 = struct {
 
         if (imm_flag == 0) {
             const sr2 = instr & 0x7;
-            self.reg[dr] = self.reg[sr1] + self.reg[sr2];
+            self.reg[dr] = self.reg[sr1] +% self.reg[sr2];
         } else {
             const imm5 = bit_ops.sign_extend(instr & 0x1F, 5);
-            self.reg[dr] = self.reg[sr1] + imm5;
+            self.reg[dr] = self.reg[sr1] +% imm5;
         }
 
         self.update_flag(dr);
@@ -209,27 +218,27 @@ pub const LC3 = struct {
         // we will only brnach if the nzp condition flag matches the condition flag in the register
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         const cond_code = (instr >> 9) & 0x7;
-        if ((cond_code & self.reg[@intFromEnum(R.COND)]) != 0) {
-            self.reg[@intFromEnum(R.PC)] += pc_offset;
+        if ((cond_code & self.reg[@backingInt(R.COND)]) != 0) {
+            self.reg[@backingInt(R.PC)] +%= pc_offset;
         }
     }
 
     fn op_jmp(self: *Self, instr: u16) void {
         const br = (instr >> 6) & 0x7;
-        self.reg[@intFromEnum(R.PC)] = self.reg[br];
+        self.reg[@backingInt(R.PC)] = self.reg[br];
     }
 
     fn op_jsr(self: *Self, instr: u16) void {
         // this bit will determine if the pc will be set or offset
         const mode_flag = (instr >> 11) & 0x1;
         // save checkpoint of current index of pc
-        self.reg[@intFromEnum(R.R7)] = self.reg[@intFromEnum(R.PC)];
+        self.reg[@backingInt(R.R7)] = self.reg[@backingInt(R.PC)];
         if (mode_flag == 0) {
             const br = (instr >> 6) & 0x7;
-            self.reg[@intFromEnum(R.PC)] = self.reg[br]; // JSSR
+            self.reg[@backingInt(R.PC)] = self.reg[br]; // JSSR
         } else {
             const pc_offset = bit_ops.sign_extend(instr & 0x7FF, 11);
-            self.reg[@intFromEnum(R.PC)] += pc_offset; // JSR
+            self.reg[@backingInt(R.PC)] +%= pc_offset; // JSR
         }
     }
 
@@ -237,7 +246,7 @@ pub const LC3 = struct {
         const dr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         // use the offset address, to move data from memory to DR
-        self.reg[dr] = try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
+        self.reg[dr] = try self.mem_read(self.reg[@backingInt(R.PC)] +% pc_offset);
 
         self.update_flag(dr);
     }
@@ -246,7 +255,7 @@ pub const LC3 = struct {
         const dr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
         // take the address at one location in memory, to access another location, and store data in DR
-        self.reg[dr] = try self.mem_read(try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset));
+        self.reg[dr] = try self.mem_read(try self.mem_read(self.reg[@backingInt(R.PC)] +% pc_offset));
 
         self.update_flag(dr);
     }
@@ -256,7 +265,7 @@ pub const LC3 = struct {
         const br = (instr >> 6) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x3F, 6);
 
-        self.reg[dr] = try self.mem_read(self.reg[br] + pc_offset);
+        self.reg[dr] = try self.mem_read(self.reg[br] +% pc_offset);
 
         self.update_flag(dr);
     }
@@ -265,7 +274,7 @@ pub const LC3 = struct {
         const dr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
 
-        self.reg[dr] = self.reg[@intFromEnum(R.PC)] + pc_offset;
+        self.reg[dr] = self.reg[@backingInt(R.PC)] +% pc_offset;
 
         self.update_flag(dr);
     }
@@ -279,15 +288,11 @@ pub const LC3 = struct {
         self.update_flag(dr);
     }
 
-    fn op_rti() void {
-        std.debug.panic("unused op code", .{});
-    }
-
     fn op_st(self: *Self, instr: u16) void {
         const sr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
 
-        const addr = self.reg[@intFromEnum(R.PC)] + pc_offset;
+        const addr = self.reg[@backingInt(R.PC)] +% pc_offset;
         const val = self.reg[sr];
 
         self.mem_write(addr, val);
@@ -297,7 +302,7 @@ pub const LC3 = struct {
         const sr = (instr >> 9) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x1FF, 9);
 
-        const addr = try self.mem_read(self.reg[@intFromEnum(R.PC)] + pc_offset);
+        const addr = try self.mem_read(self.reg[@backingInt(R.PC)] +% pc_offset);
         const val = self.reg[sr];
 
         self.mem_write(addr, val);
@@ -308,20 +313,15 @@ pub const LC3 = struct {
         const br = (instr >> 6) & 0x7;
         const pc_offset = bit_ops.sign_extend(instr & 0x3F, 6);
 
-        const addr = self.reg[br] + pc_offset;
+        const addr = self.reg[br] +% pc_offset;
         const val = self.reg[sr];
 
         self.mem_write(addr, val);
     }
 
-    fn op_res() void {
-        std.debug.panic("unused op code", .{});
-    }
-
     fn op_trap(self: *Self, instr: u16) !void {
-        self.reg[@intFromEnum(R.R7)] = self.reg[@intFromEnum(R.PC)];
-        const trap_code: TRAP = @enumFromInt(instr & 0xFF);
-        std.debug.print("trap: {}\n", .{trap_code});
+        self.reg[@backingInt(R.R7)] = self.reg[@backingInt(R.PC)];
+        const trap_code: TRAP = @fromBackingInt(@intCast(instr & 0xFF));
         switch (trap_code) {
             .GETC => try self.trap_getc(),
             .OUT => try self.trap_out(),
@@ -335,23 +335,23 @@ pub const LC3 = struct {
     fn trap_getc(self: *Self) !void {
         const char = try self.term.get_char();
 
-        self.reg[@intFromEnum(R.R0)] = @as(u16, char);
+        self.reg[@backingInt(R.R0)] = @as(u16, char);
 
-        self.update_flag(@intFromEnum(R.R0));
+        self.update_flag(@backingInt(R.R0));
     }
 
     fn trap_out(self: *Self) !void {
-        const char = self.reg[@intFromEnum(R.R0)];
+        const char = self.reg[@backingInt(R.R0)];
         try self.term.put_char(@intCast(char));
         // try self.term.flush();
     }
 
     fn trap_puts(self: *Self) !void {
-        var index = self.reg[@intFromEnum(R.R0)];
+        var index = self.reg[@backingInt(R.R0)];
         var char = try self.mem_read(index);
 
         while (char != 0x0000) : ({
-            index += 1;
+            index +%= 1;
             char = try self.mem_read(index);
         }) {
             try self.term.put_char(@intCast(char));
@@ -367,16 +367,16 @@ pub const LC3 = struct {
 
         // try self.term.flush();
 
-        self.reg[@intFromEnum(R.R0)] = @as(u16, char);
-        self.update_flag(@intFromEnum(R.R0));
+        self.reg[@backingInt(R.R0)] = @as(u16, char);
+        self.update_flag(@backingInt(R.R0));
     }
 
     fn trap_putsp(self: *Self) !void {
-        var index = self.reg[@intFromEnum(R.R0)];
+        var index = self.reg[@backingInt(R.R0)];
         var char = try self.mem_read(index);
 
         while (char != 0x0000) : ({
-            index += 1;
+            index +%= 1;
             char = try self.mem_read(index);
         }) {
             const char1: u8 = @intCast(char & 0xFF);
@@ -398,3 +398,49 @@ pub const LC3 = struct {
         self.running = false;
     }
 };
+
+test "load an LC-3 image at the origin in its header" {
+    var term: termios.Term = undefined;
+    var vm = LC3.init(&term);
+    var reader = Io.Reader.fixed(&.{ 0x40, 0x00, 0x12, 0x34, 0xF0, 0x25 });
+
+    try vm.load_image(&reader);
+
+    try std.testing.expectEqual(@as(u16, 0x4000), vm.reg[@backingInt(R.PC)]);
+    try std.testing.expectEqualSlices(u16, &.{ 0x1234, 0xF025 }, vm.memory[0x4000..0x4002]);
+}
+
+test "reject truncated and oversized images" {
+    var term: termios.Term = undefined;
+    var vm = LC3.init(&term);
+    var truncated = Io.Reader.fixed(&.{ 0x30, 0x00, 0xF0 });
+    try std.testing.expectError(error.TruncatedRom, vm.load_image(&truncated));
+
+    var oversized = Io.Reader.fixed(&.{ 0xFF, 0xFF, 0xF0, 0x25, 0x00, 0x00 });
+    try std.testing.expectError(error.RomTooLarge, vm.load_image(&oversized));
+}
+
+test "negative PC-relative offsets use 16-bit arithmetic" {
+    var term: termios.Term = undefined;
+    var vm = LC3.init(&term);
+    vm.reset();
+
+    vm.op_br(0x05FF); // BRz #-1
+
+    try std.testing.expectEqual(@as(u16, PC_START - 1), vm.reg[@backingInt(R.PC)]);
+}
+
+test "RTI and reserved opcodes stop execution with distinct errors" {
+    var term: termios.Term = undefined;
+    var vm = LC3.init(&term);
+
+    vm.reset();
+    vm.memory[PC_START] = 0x8000; // RTI
+    try std.testing.expectError(error.UnsupportedRTI, vm.start());
+    try std.testing.expect(!vm.running);
+
+    vm.reset();
+    vm.memory[PC_START] = 0xD000; // Reserved
+    try std.testing.expectError(error.IllegalOpcode, vm.start());
+    try std.testing.expect(!vm.running);
+}
